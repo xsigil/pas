@@ -1,74 +1,82 @@
-<!-- STREAMING_CHUNK:Rendering header and badge section... -->
 # pas (pastore)
 
-> **Zero-Metadata, Anti-Forensic Secret Store for Wayland & Linux**  
-> *The spiritual, OpSec-hardened successor to standard password stores.*
+> **Zero-Metadata, Anti-Forensic Secret Fortress for Wayland & Linux**  
+> *A hardened, monolithic encrypted secret vault eliminating temporal, structural, and recipient traces.*
 
 [![Go Version](https://img.shields.io/badge/go-1.22+-blue.svg)](https://golang.org)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Wayland-lightgrey.svg)](https://wayland.freedesktop.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Security: Anti--Forensic](https://img.shields.io/badge/OpSec-Temporal%20%26%20Metadata%20Hardened-orange.svg)](#security-architecture)
+[![Security: Monolithic Vault](https://img.shields.io/badge/Architecture-Monolithic%20Encrypted%20Vault-orange.svg)](#threat-model--monolithic-architecture)
 
 ---
 
-<!-- STREAMING_CHUNK:Documenting the rationale and comparison... -->
 ## Why `pas`?
 
-Classic tools like `pass` (the standard Unix password manager) encrypt entry *contents*, but leave **vital metadata completely bare**:
-- Plaintext filenames reveal sensitive service names (`~/.password-store/Finance/Chase.gpg`, `namethatporn.com.gpg`).
-- Plaintext filenames often leak personal email addresses (`user@gmail.com.gpg`).
-- Filesystem `mtime` and `atime` timestamps log the exact second you logged into each service, building a forensic chronological profile of your daily life.
-- Standard OpenPGP headers expose recipient Key IDs (`-r KEYID`), allowing anyone with disk access to identify who owns the store.
+Classic secret managers like standard Unix `pass` (ZX2C4) encrypt the *payload* of individual entries, but leave critical system metadata naked to forensic extraction:
 
-`pas` solves this by treating **all metadata as classified material**, without sacrificing Unix minimalism or interactive speed:
+- **Directory & Filename Leaks**: Disk trees directly advertise every bank, institutional service, and personal email address you use (`~/.password-store/Finance/Chase/user@example.com.gpg`).
+- **Activity Timelines**: Filesystem `mtime` and `atime` timestamps log access moments down to the second, allowing investigators to construct your daily schedule.
+- **Entry Counts & Sizing**: The number of `.gpg` files on disk discloses exactly how many secrets you hold; file sizes hint at notes or recovery codes.
+- **OpenPGP Key ID Exposure**: Normal GPG headers store recipient Key IDs, tying encrypted records directly to public cryptographic identities.
+- **Agent Flooding**: Decrypting hundreds of isolated files creates IPC race conditions and repeated pinentry passphrase prompts.
 
-| Feature | Standard `pass` | `pas` |
-| :--- | :--- | :--- |
-| **Payload Encryption** | GPG symmetric/asymmetric | GPG Asymmetric with `--throw-keyids` (Zero Key ID leakage) |
-| **Filenames** | Plaintext (`service/email.gpg`) | **16-char SHA-256 account hash** (`4cbdbf16a427371f.yaml.gpg`) |
-| **Filesystem Timestamps** | Leaks real-time activity (`mtime`) | **Fixed to `EpochZero` (`1970-01-01 00:00:00 UTC`)** |
-| **Permissions** | System default | Enforced `0700` directories / `0600` files (`umask 0077`) |
-| **Data Format** | Fragile multiline text | Structured, human-readable **YAML** inside GPG |
-| **Search Experience** | `tree` / linear filename search | **Concurrent in-memory decryption + fuzzy interactive `fzf`** |
-| **Clipboard** | `xclip` / `xsel` (X11) | **Native Wayland (`wl-copy`) with auto-clear countdown** |
-| **Destruction** | Standard `rm` | **Cryptographic random overwriting (shred) before unlink** |
+`pas` eliminates these attack vectors with a **Monolithic Encrypted Vault** architecture. The entire repository is aggregated into a single, anonymous encrypted file:
 
----
-
-<!-- STREAMING_CHUNK:Documenting architecture and in-memory flow... -->
-## Security Architecture
-
-```
-            [ Encrypted At Rest on Disk ]
- ├── ~/.pastore/dev/github.com/
- │    └── 4cbdbf16a427371f.yaml.gpg   <-- Access/Mod: 1970-01-01 (EpochZero)
- │                                     <-- Recipient ID: 0000000000000000
- └── ~/.pastore/.gpg-id                <-- Mode: 0600
-
-                       │  Parallel In-Memory Goroutines (CPU x 2)
-                       ▼  (Zero plaintext written to disk or swap)
-
-            [ Ephemeral Memory Buffer ]
- ┌───────────────────────────────────────────────────────────────┐
- │ Entry { Title: "GitHub", Account: "zorba", URL: "github.com" }│
- └───────────────────────────────┬───────────────────────────────┘
-                                 ▼
-                     [ Interactive fzf UI ]
-  dev/github.com/4cbdbf1...  │  GitHub  │  zorba  │  github.com
-                                 │
-     ┌───────────────┬───────────┴───────────┬───────────────┐
-   Enter          Ctrl-Y                   Ctrl-U          Ctrl-O
-     │               │                       │               │
-Password          Account                  URL              OTP
-     └───────────────┴───────────┬───────────┴───────────────┘
-                                 ▼
-                     [ wl-copy (Wayland) ]
-                      Auto-clears in 45s
-```
+| Attack Vector / Metric | Standard `pass` | Multi-file Tools | `pas` (Monolithic Vault) |
+| :--- | :--- | :--- | :--- |
+| **Filesystem Tree** | Exposed on disk | Hash-anonymized | **Zero directory tree on disk** |
+| **File Count** | Number of secrets exposed | Number of secrets exposed | **Exactly 1 master vault file** |
+| **Individual Entry Size** | Leaked per secret | Leaked per secret | **Fully aggregated & hidden** |
+| **Access Timestamps** | Real-time forensic log | Partially masked | **Fixed to `1970-01-01` (EpochZero)** |
+| **Recipient Key IDs** | Plaintext Key ID in headers | Often exposed | **`--throw-keyids` (Zero key leakage)** |
+| **Passphrase Entry** | Repeated prompts or caching | Agent race conditions | **Single unlock on load** |
+| **Search Performance** | Linear file reads | Parallel GPG spawns | **Single in-memory decrypt + instant `fzf`** |
+| **Display Protocol** | X11 (`xclip` clipboard snoop) | Mixed | **Native Wayland (`wl-copy`) with auto-clear** |
 
 ---
 
-<!-- STREAMING_CHUNK:Documenting installation and setup... -->
+## Threat Model & Monolithic Architecture
+
+```
+                  [ Physical Storage at Rest ]
+                  ~/.pastore/
+                  ├── .gpg-id         (Mode: 0600)
+                  └── vault.yaml.gpg  (Mode: 0600, mtime: 1970-01-01 00:00:00 UTC)
+                                      (Recipient ID: 0000000000000000)
+
+                                       │
+                                       │ 1. Single GPG Decrypt (1 Master Passphrase Prompt)
+                                       ▼
+                       [ Ephemeral Process Memory ]
+        ┌─────────────────────────────────────────────────────────────┐
+        │ Vault { Version: 1, Entries: [ ...460+ Credential Records ] }│
+        └──────────────────────────────┬──────────────────────────────┘
+                                       │
+                                       ▼
+                             [ Interactive fzf UI ]
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ _network/home/rental/api.heroku.com  │  Heroku API  │  user@example.com  │  ...  │
+└──────────────────────────────────────┬───────────────────────────────────────────┘
+                                       │
+               ┌───────────┬───────────┼───────────┬───────────┐
+             Enter       Ctrl-Y      Ctrl-T      Ctrl-U      Ctrl-O
+               │           │           │           │           │
+            Password    Account      Title        URL         OTP
+               └───────────┴───────────┬───────────┴───────────┘
+                                       ▼
+                         [ Wayland Secure Clipboard ]
+                         `wl-copy -n` (Auto-clears in 45s)
+```
+
+1. **Physical Asset Seizure**:
+   An adversary capturing the raw storage drive finds a solitary file: `vault.yaml.gpg`. They cannot deduce how many credentials exist, what hierarchies or domains are stored, or which key fingerprint was used to encrypt it.
+2. **Temporal Neutralization**:
+   Every write operation creates an atomic temporary file, replaces the vault, and resets directory and file timestamps to `1970-01-01 00:00:00 UTC` (`EpochZero`).
+3. **Zero Plaintext Disk Spill**:
+   Edits, imports, moves, and deletions occur in memory. Plaintext YAML never touches disk, temp directories, or unencrypted swap.
+
+---
+
 ## Installation
 
 ### Prerequisites (Arch Linux / Wayland)
@@ -86,73 +94,114 @@ sudo make install
 
 ---
 
-<!-- STREAMING_CHUNK:Documenting store initialization and quickstart... -->
 ## Quickstart
 
-### 1. Initialize Your Store
-Set up your store directory (`~/.pastore`) and register your GPG public key:
+### 1. Initialize Recipient Key
+Create your secure vault directory and register your GPG public key ID:
 ```bash
 mkdir -p ~/.pastore
-echo "YOUR_GPG_KEY_FINGERPRINT_OR_EMAIL" > ~/.pastore/.gpg-id
+chmod 700 ~/.pastore
+echo "YOUR_GPG_KEY_FINGERPRINT_OR_ID" > ~/.pastore/.gpg-id
 chmod 600 ~/.pastore/.gpg-id
 ```
 
 ### 2. Generate a Hardened Credential
 ```bash
-pas generate -H test-user@zorba.org dev/github.com
+pas generate -a user@example.com -t "GitHub Personal" -u "github.com" dev/github/personal
 ```
-* Generates a 24-character cryptographic password.
-* Automatically hashes the account into `~/.pastore/dev/github.com/<hash>.yaml.gpg`.
-* Cleanses the filesystem timestamp to `1970-01-01`.
-* Copies the password directly into Wayland clipboard (`wl-copy`), self-destructing in 45 seconds.
+- Creates a 24-character cryptographic password.
+- Atomically encrypts the record into `~/.pastore/vault.yaml.gpg`.
+- Copies the password to Wayland clipboard with a 45-second auto-clear countdown.
+- Normalizes filesystem timestamps to `1970-01-01`.
 
 ### 3. Interactive Search (`fzf`)
-Simply invoke `pas` with no arguments:
+Execute `pas` without arguments:
 ```bash
 pas
 ```
-* **Instant Decryption**: Parallel goroutines decrypt entries into memory without touching disk.
-* **4-Column Fuzzy Finder**: Search seamlessly by Directory, Title, Account, or URL.
-* **Hotkeys**:
+- **Instant Decryption**: The master vault decrypts once in memory.
+- **4-Column Fuzzy Finder**: Search across Virtual Path, Title, Account, or URL.
+- **Actions**:
   - `Enter`: Copy **Password**
   - `Ctrl-Y`: Copy **Account / Username**
-  - `Ctrl-U`: Copy **URL / Service**
-  - `Ctrl-T`: Copy **Title**
-  - `Ctrl-O`: Copy **OTP** (if present)
+  - `Ctrl-T`: Copy **Title / Friendly Name**
+  - `Ctrl-U`: Copy **Service URL**
+  - `Ctrl-O`: Copy **OTP Secret**
 
-### 4. Move, Rename, and Securely Shred
+---
+
+## CLI Reference
+
+### Direct Retrieval
 ```bash
-# Safely rename/move entry while preserving zero-metadata timestamps:
-pas mv dev/github.com/4cbdbf16a427371f personal/github.com/
+# Copy password for specific path
+pas dev/github/personal
 
-# Cryptographically overwrite with random noise and delete:
-pas rm personal/github.com/4cbdbf16a427371f
+# Copy username/account
+pas dev/github/personal account
+
+# Print password directly to stdout
+pas -p dev/github/personal
+
+# Print entire YAML entry block
+pas -p dev/github/personal ""
+
+# Custom clipboard auto-clear duration (e.g. 10 seconds)
+pas -clear 10 dev/github/personal
 ```
 
-### 5. Audit & Sanitize
-Audit your store to ensure every file and directory strictly adheres to `0700`/`0600` permissions and `EpochZero` timestamps:
+### Structural Reorganization (`mv`)
+Reorganize entries or entire directory hierarchies without leaving filesystem traces:
+```bash
+# Move a single entry
+pas mv dev/github/personal work/github/personal
+
+# Move an entire virtual directory tree
+pas mv _network/home/ infra/home/
+```
+
+### Deletion (`rm`)
+```bash
+# Remove a single entry
+pas rm work/github/personal
+
+# Recursively remove an entire virtual path tree
+pas rm -r infra/home
+```
+
+### Auditing & Sanitization (`audit`)
+Ensure file modes and timestamps strictly conform to the security baseline:
 ```bash
 pas audit
 ```
 
+### Vault Export (`export`)
+Dump the decrypted YAML vault to stdout (ideal for encrypted off-site backups or piping):
+```bash
+pas export | gpg --symmetric -o backup-vault.yaml.gpg
+```
+
 ---
 
-<!-- STREAMING_CHUNK:Documenting legacy migration workflow... -->
-## Migrating from ZX2C4 `pass`
+## Migrating from Legacy `pass` (ZX2C4)
 
-Have a store full of plaintext filenames and legacy `.gpg` entries? `pas` includes a stream migration script that:
-- Runs **100% in-memory** via GPG pipelines.
-- Automatically preserves original filenames as `title` and `url`.
-- Parses username/password key-value pairs or multiline formats.
-- Anonymizes filenames into 16-character account hashes.
+`pas` provides a native migration engine that sequentially parses existing multi-file stores and compiles them into a single monolithic vault:
 
 ```bash
-# Dry run preview (zero changes to disk)
-DRY_RUN=1 ./scripts/migrate-legacy.sh
+# Migrate from default ~/.password-store to ~/.pastore
+pas migrate
 
-# Perform migration from ~/.password-store to ~/.pastore
-./scripts/migrate-legacy.sh
+# Migrate from a custom directory
+pas migrate -from /path/to/legacy-store
 ```
+
+The migration engine:
+- Reads all `.gpg` files sequentially without agent concurrency races.
+- Automatically preserves original file paths as the virtual `path`.
+- Detects filenames as friendly `title` and extracts URLs when domains are present.
+- Extracts `password:`, `account:`, `url:`, and `otp:` labels, falling back to positional lines.
+- Normalizes CRLF line endings to prevent YAML parse failures.
+- Atomically writes and encrypts `vault.yaml.gpg` with `--throw-keyids`.
 
 ---
 
