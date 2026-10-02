@@ -67,7 +67,7 @@ type IndexItem struct {
 }
 
 type CryptoService interface {
-	Decrypt(path string) ([]byte, error)
+	Decrypt(path string, storeDir string) ([]byte, error)
 	Encrypt(recipients []string, plaintext []byte, outputPath string) error
 	GetRecipients(storeDir string) ([]string, error)
 }
@@ -90,8 +90,19 @@ func NewGPGService() *GPGService {
 	return &GPGService{}
 }
 
-func (g *GPGService) Decrypt(path string) ([]byte, error) {
-	cmd := exec.Command("gpg", "--quiet", "--batch", "--decrypt", path)
+func (g *GPGService) Decrypt(path string, storeDir string) ([]byte, error) {
+	args := []string{"--quiet", "--batch"}
+
+	// Target only recipients listed in .gpg-id to prevent iterating through every key in keyring
+	if recipients, err := g.GetRecipients(storeDir); err == nil {
+		for _, r := range recipients {
+			args = append(args, "--try-secret-key", r)
+		}
+	}
+
+	args = append(args, "--decrypt", path)
+
+	cmd := exec.Command("gpg", args...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -257,7 +268,7 @@ func (uc *CredentialUseCase) Retrieve(target, key string, printOnly bool, clearS
 		return err
 	}
 
-	data, err := uc.crypto.Decrypt(fullPath)
+	data, err := uc.crypto.Decrypt(fullPath, uc.repo.GetStoreDir())
 	if err != nil {
 		return err
 	}
@@ -310,35 +321,53 @@ func (uc *CredentialUseCase) InteractiveSearch(clearSec int) error {
 		return errors.New("pastore repository is currently empty")
 	}
 
+	// Step 1: Warmup - decrypt the first file synchronously.
+	// This prompts for passphrase exactly ONCE and primes gpg-agent's cache
+	// BEFORE spawning concurrent goroutines.
+	warmupItem := uc.decryptMetadataWorker(files[0])
+
+	// Step 2: Spawn concurrent workers for the remaining files
+	remainingFiles := files[1:]
 	numWorkers := runtime.NumCPU() * 2
-	jobs := make(chan string, len(files))
-	results := make(chan IndexItem, len(files))
-	var wg sync.WaitGroup
-
-	for w := 0; w < numWorkers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for path := range jobs {
-				results <- uc.decryptMetadataWorker(path)
-			}
-		}()
+	if len(remainingFiles) < numWorkers {
+		numWorkers = len(remainingFiles)
 	}
 
-	for _, f := range files {
-		jobs <- f
+	var results []IndexItem
+	results = append(results, warmupItem)
+
+	if len(remainingFiles) > 0 {
+		jobs := make(chan string, len(remainingFiles))
+		resChan := make(chan IndexItem, len(remainingFiles))
+		var wg sync.WaitGroup
+
+		for w := 0; w < numWorkers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for path := range jobs {
+					resChan <- uc.decryptMetadataWorker(path)
+				}
+			}()
+		}
+
+		for _, f := range remainingFiles {
+			jobs <- f
+		}
+		close(jobs)
+
+		wg.Wait()
+		close(resChan)
+
+		for item := range resChan {
+			results = append(results, item)
+		}
 	}
-	close(jobs)
 
-	wg.Wait()
-	close(results)
-
-	var items []IndexItem
 	itemMap := make(map[string]IndexItem)
 	var displayLines []string
 
-	for item := range results {
-		items = append(items, item)
+	for _, item := range results {
 		display := fmt.Sprintf("%-30s  │  %-22s  │  %-24s  │  %s", item.RelPath, item.Title, item.Account, item.URL)
 		displayLines = append(displayLines, display)
 		itemMap[display] = item
@@ -374,7 +403,7 @@ func (uc *CredentialUseCase) decryptMetadataWorker(fullPath string) IndexItem {
 	rel, _ := filepath.Rel(storeDir, fullPath)
 	cleanRel := strings.TrimSuffix(rel, ".yaml.gpg")
 
-	raw, err := uc.crypto.Decrypt(fullPath)
+	raw, err := uc.crypto.Decrypt(fullPath, storeDir)
 	if err != nil {
 		return IndexItem{RelPath: cleanRel, Title: "(locked)", Account: "(undecryptable)", URL: "", FullPath: fullPath}
 	}
@@ -538,7 +567,7 @@ func (uc *CredentialUseCase) Migrate(fromDir string, dryRun bool) error {
 	fmt.Fprintf(os.Stderr, "Discovered %d legacy entry/entries to convert into pure YAML.\n", len(legacyFiles))
 
 	for _, oldPath := range legacyFiles {
-		raw, err := uc.crypto.Decrypt(oldPath)
+		raw, err := uc.crypto.Decrypt(oldPath, sourceDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Skipping (decrypt failed): %s\n", oldPath)
 			continue
