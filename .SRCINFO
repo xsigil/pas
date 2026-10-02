@@ -1,0 +1,20 @@
+pkgbase = pas-git
+	pkgdesc = Zero-metadata, anti-forensic secret store for Wayland & Linux (VCS master/main)
+	pkgver = 1.0.0.r0.g60fe680
+	pkgrel = 1
+	url = https://github.com/xsigil/pas
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	makedepends = go
+	makedepends = git
+	depends = gnupg
+	depends = fzf
+	depends = wl-clipboard
+	optdepends = gawk: for scripts/migrate-legacy.sh legacy store migration
+	provides = pas
+	conflicts = pas
+	source = pas::git+https://github.com/xsigil/pas.git
+	sha256sums = SKIP
+
+pkgname = pas-git
