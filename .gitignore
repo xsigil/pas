@@ -1,0 +1,31 @@
+# STREAMING_CHUNK:Configuring build outputs and executable binaries...
+# Binaries and build artifacts
+build/
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# STREAMING_CHUNK:Configuring environment and test stores...
+# Test and local secret stores (safety guardrails)
+.pastore/
+*.gpg
+*.yaml
+*.tar.bz2
+*.tar.gz
+
+# STREAMING_CHUNK:Configuring IDE and editor configurations...
+# Editor and OS metadata
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
