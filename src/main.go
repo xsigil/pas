@@ -60,6 +60,7 @@ func ComputeAccountHash(account string) string {
 type IndexItem struct {
 	RelPath  string
 	Account  string
+	URL      string
 	FullPath string
 }
 
@@ -336,7 +337,7 @@ func (uc *CredentialUseCase) InteractiveSearch(clearSec int) error {
 
 	for item := range results {
 		items = append(items, item)
-		display := fmt.Sprintf("%-50s  │  %s", item.RelPath, item.Account)
+		display := fmt.Sprintf("%-35s  │  %-28s  │  %s", item.RelPath, item.Account, item.URL)
 		displayLines = append(displayLines, display)
 		itemMap[display] = item
 	}
@@ -354,6 +355,8 @@ func (uc *CredentialUseCase) InteractiveSearch(clearSec int) error {
 	keyToFetch := "password"
 	if action == "ctrl-y" {
 		keyToFetch = "account"
+	} else if action == "ctrl-u" {
+		keyToFetch = "url"
 	} else if action == "ctrl-o" {
 		keyToFetch = "otp"
 	}
@@ -368,17 +371,23 @@ func (uc *CredentialUseCase) decryptMetadataWorker(fullPath string) IndexItem {
 
 	raw, err := uc.crypto.Decrypt(fullPath)
 	if err != nil {
-		return IndexItem{RelPath: cleanRel, Account: "(locked/undecryptable)", FullPath: fullPath}
+		return IndexItem{RelPath: cleanRel, Account: "(locked/undecryptable)", URL: "", FullPath: fullPath}
 	}
 
 	account := ""
+	url := ""
 	var doc map[string]any
 	if err := yaml.Unmarshal(raw, &doc); err == nil {
 		for k, v := range doc {
 			lk := strings.ToLower(k)
 			if lk == "account" || lk == "email" || lk == "user" {
-				account = fmt.Sprintf("%v", v)
-				break
+				if account == "" {
+					account = fmt.Sprintf("%v", v)
+				}
+			} else if lk == "url" || lk == "link" || lk == "service" {
+				if url == "" {
+					url = fmt.Sprintf("%v", v)
+				}
 			}
 		}
 	}
@@ -386,6 +395,7 @@ func (uc *CredentialUseCase) decryptMetadataWorker(fullPath string) IndexItem {
 	return IndexItem{
 		RelPath:  cleanRel,
 		Account:  account,
+		URL:      url,
 		FullPath: fullPath,
 	}
 }
@@ -395,8 +405,8 @@ func (uc *CredentialUseCase) runFzfUI(lines []string) (string, string, error) {
 		"--height=40%",
 		"--reverse",
 		"--prompt=pas > ",
-		"--header=Enter: copy password | Ctrl-Y: copy account | Ctrl-O: copy otp",
-		"--expect=ctrl-y,ctrl-o",
+		"--header=Enter: password | Ctrl-Y: account | Ctrl-U: url | Ctrl-O: otp",
+		"--expect=ctrl-y,ctrl-u,ctrl-o",
 	)
 	cmd.Stdin = strings.NewReader(strings.Join(lines, "\n"))
 	cmd.Stderr = os.Stderr
@@ -621,6 +631,119 @@ func (uc *CredentialUseCase) Audit() error {
 	return nil
 }
 
+// Move safely moves or renames an entry or directory, handles git tracking, and resets mtime to EpochZero.
+func (uc *CredentialUseCase) Move(src, dst string) error {
+	storeDir := uc.repo.GetStoreDir()
+
+	srcDirFull := filepath.Join(storeDir, src)
+	srcInfo, err := os.Stat(srcDirFull)
+	isSrcDir := err == nil && srcInfo.IsDir()
+
+	var srcFull string
+	if isSrcDir {
+		srcFull = srcDirFull
+	} else {
+		resolved, err := uc.repo.ResolvePath(src)
+		if err != nil {
+			return fmt.Errorf("source entry not found: %w", err)
+		}
+		srcFull = resolved
+	}
+
+	cleanDst := dst
+	dstFull := filepath.Join(storeDir, cleanDst)
+	dstInfo, dstErr := os.Stat(dstFull)
+
+	var targetPath string
+	if !isSrcDir {
+		if (dstErr == nil && dstInfo.IsDir()) || strings.HasSuffix(dst, "/") {
+			targetPath = filepath.Join(dstFull, filepath.Base(srcFull))
+		} else {
+			if !strings.HasSuffix(cleanDst, ".yaml.gpg") {
+				cleanDst += ".yaml.gpg"
+			}
+			targetPath = filepath.Join(storeDir, cleanDst)
+		}
+	} else {
+		targetPath = dstFull
+	}
+
+	targetDir := filepath.Dir(targetPath)
+	if err := os.MkdirAll(targetDir, DirPermSecure); err != nil {
+		return fmt.Errorf("failed to create destination directory: %w", err)
+	}
+
+	hasGit := false
+	if _, err := os.Stat(filepath.Join(storeDir, ".git")); err == nil {
+		hasGit = true
+	}
+
+	moved := false
+	if hasGit {
+		relSrc, _ := filepath.Rel(storeDir, srcFull)
+		relDst, _ := filepath.Rel(storeDir, targetPath)
+		cmd := exec.Command("git", "-C", storeDir, "mv", relSrc, relDst)
+		if err := cmd.Run(); err == nil {
+			moved = true
+		}
+	}
+
+	if !moved {
+		if err := os.Rename(srcFull, targetPath); err != nil {
+			return fmt.Errorf("move failed: %w", err)
+		}
+	}
+
+	_ = filepath.Walk(targetPath, func(p string, info os.FileInfo, err error) error {
+		if err == nil {
+			_ = uc.repo.SanitizeTimestamp(p)
+		}
+		return nil
+	})
+	_ = uc.repo.SanitizeTimestamp(targetDir)
+
+	relSrc, _ := filepath.Rel(storeDir, srcFull)
+	relTarget, _ := filepath.Rel(storeDir, targetPath)
+	fmt.Printf("Moved: %s -> %s\n", relSrc, relTarget)
+	return nil
+}
+
+// Remove securely shreds and deletes an entry or directory.
+func (uc *CredentialUseCase) Remove(target string, recursive bool) error {
+	storeDir := uc.repo.GetStoreDir()
+	targetDirFull := filepath.Join(storeDir, target)
+	info, err := os.Stat(targetDirFull)
+
+	if err == nil && info.IsDir() {
+		if !recursive {
+			return fmt.Errorf("'%s' is a directory, use -r or --recursive", target)
+		}
+		_ = filepath.WalkDir(targetDirFull, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			_ = uc.repo.SecureWipe(path)
+			return nil
+		})
+		_ = os.RemoveAll(targetDirFull)
+		fmt.Printf("Removed directory (shredded): %s\n", target)
+		return nil
+	}
+
+	fullPath, err := uc.repo.ResolvePath(target)
+	if err != nil {
+		return err
+	}
+
+	if err := uc.repo.SecureWipe(fullPath); err != nil {
+		return fmt.Errorf("failed to remove: %w", err)
+	}
+
+	rel, _ := filepath.Rel(storeDir, fullPath)
+	fmt.Printf("Removed (securely shredded): %s\n", rel)
+	return nil
+}
+
 var version = "1.0.0"
 
 func main() {
@@ -643,6 +766,12 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "mv":
+			runMoveCLI(app, os.Args[2:])
+			return
+		case "rm":
+			runRemoveCLI(app, os.Args[2:])
+			return
 		case "version", "--version":
 			fmt.Printf("pas v%s (Arch Linux / Wayland Native)\n", version)
 			return
@@ -650,6 +779,38 @@ func main() {
 	}
 
 	runDefaultCLI(app, os.Args[1:])
+}
+
+func runMoveCLI(app *CredentialUseCase, args []string) {
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, "Usage: pas mv <source> <destination>")
+		os.Exit(1)
+	}
+	if err := app.Move(args[0], args[1]); err != nil {
+		fmt.Fprintf(os.Stderr, "Move error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runRemoveCLI(app *CredentialUseCase, args []string) {
+	fs := flag.NewFlagSet("rm", flag.ExitOnError)
+	var recursive bool
+	fs.BoolVar(&recursive, "r", false, "Remove directories recursively")
+	fs.BoolVar(&recursive, "recursive", false, "Remove directories recursively")
+	_ = fs.Parse(args)
+
+	targets := fs.Args()
+	if len(targets) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: pas rm [-r] <target>")
+		os.Exit(1)
+	}
+
+	for _, t := range targets {
+		if err := app.Remove(t, recursive); err != nil {
+			fmt.Fprintf(os.Stderr, "Remove error on %s: %v\n", t, err)
+			os.Exit(1)
+		}
+	}
 }
 
 func runDefaultCLI(app *CredentialUseCase, args []string) {
