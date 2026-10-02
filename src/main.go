@@ -41,6 +41,7 @@ func init() {
 // Entry represents the structured credential payload of encrypted .yaml.gpg files.
 type Entry struct {
 	Password  string            `yaml:"password"`
+	Title     string            `yaml:"title,omitempty"`
 	Account   string            `yaml:"account,omitempty"`
 	URL       string            `yaml:"url,omitempty"`
 	OTP       string            `yaml:"otp,omitempty"`
@@ -59,6 +60,7 @@ func ComputeAccountHash(account string) string {
 
 type IndexItem struct {
 	RelPath  string
+	Title    string
 	Account  string
 	URL      string
 	FullPath string
@@ -337,7 +339,7 @@ func (uc *CredentialUseCase) InteractiveSearch(clearSec int) error {
 
 	for item := range results {
 		items = append(items, item)
-		display := fmt.Sprintf("%-35s  │  %-28s  │  %s", item.RelPath, item.Account, item.URL)
+		display := fmt.Sprintf("%-30s  │  %-22s  │  %-24s  │  %s", item.RelPath, item.Title, item.Account, item.URL)
 		displayLines = append(displayLines, display)
 		itemMap[display] = item
 	}
@@ -353,11 +355,14 @@ func (uc *CredentialUseCase) InteractiveSearch(clearSec int) error {
 	}
 
 	keyToFetch := "password"
-	if action == "ctrl-y" {
+	switch action {
+	case "ctrl-y":
 		keyToFetch = "account"
-	} else if action == "ctrl-u" {
+	case "ctrl-t":
+		keyToFetch = "title"
+	case "ctrl-u":
 		keyToFetch = "url"
-	} else if action == "ctrl-o" {
+	case "ctrl-o":
 		keyToFetch = "otp"
 	}
 
@@ -371,16 +376,21 @@ func (uc *CredentialUseCase) decryptMetadataWorker(fullPath string) IndexItem {
 
 	raw, err := uc.crypto.Decrypt(fullPath)
 	if err != nil {
-		return IndexItem{RelPath: cleanRel, Account: "(locked/undecryptable)", URL: "", FullPath: fullPath}
+		return IndexItem{RelPath: cleanRel, Title: "(locked)", Account: "(undecryptable)", URL: "", FullPath: fullPath}
 	}
 
+	title := ""
 	account := ""
 	url := ""
 	var doc map[string]any
 	if err := yaml.Unmarshal(raw, &doc); err == nil {
 		for k, v := range doc {
 			lk := strings.ToLower(k)
-			if lk == "account" || lk == "email" || lk == "user" {
+			if lk == "title" || lk == "name" || lk == "service_name" {
+				if title == "" {
+					title = fmt.Sprintf("%v", v)
+				}
+			} else if lk == "account" || lk == "email" || lk == "user" {
 				if account == "" {
 					account = fmt.Sprintf("%v", v)
 				}
@@ -394,6 +404,7 @@ func (uc *CredentialUseCase) decryptMetadataWorker(fullPath string) IndexItem {
 
 	return IndexItem{
 		RelPath:  cleanRel,
+		Title:    title,
 		Account:  account,
 		URL:      url,
 		FullPath: fullPath,
@@ -405,8 +416,8 @@ func (uc *CredentialUseCase) runFzfUI(lines []string) (string, string, error) {
 		"--height=40%",
 		"--reverse",
 		"--prompt=pas > ",
-		"--header=Enter: password | Ctrl-Y: account | Ctrl-U: url | Ctrl-O: otp",
-		"--expect=ctrl-y,ctrl-u,ctrl-o",
+		"--header=Enter: password | Ctrl-T: title | Ctrl-Y: account | Ctrl-U: url | Ctrl-O: otp",
+		"--expect=ctrl-t,ctrl-y,ctrl-u,ctrl-o",
 	)
 	cmd.Stdin = strings.NewReader(strings.Join(lines, "\n"))
 	cmd.Stderr = os.Stderr
