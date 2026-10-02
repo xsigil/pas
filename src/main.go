@@ -30,6 +30,10 @@ const (
 	DefaultClearSec = 45
 	VaultFileName   = "vault.yaml.gpg"
 	GpgIdFileName   = ".gpg-id"
+
+	ColWidthPath    = 44
+	ColWidthTitle   = 22
+	ColWidthAccount = 26
 )
 
 // init guarantees that under any code execution path, umask 0077 is active.
@@ -260,6 +264,19 @@ func NewVaultUseCase(repo *VaultRepository, clip ClipboardService) *VaultUseCase
 	return &VaultUseCase{repo: repo, clipboard: clip}
 }
 
+// fitColumn safely truncates long strings with an ellipsis and pads to target width
+func fitColumn(s string, width int) string {
+	s = strings.TrimSpace(s)
+	r := []rune(s)
+	if len(r) > width {
+		if width <= 1 {
+			return string(r[:width])
+		}
+		return string(r[:width-1]) + "…"
+	}
+	return s + strings.Repeat(" ", width-len(r))
+}
+
 func (uc *VaultUseCase) InteractiveSearch(clearSec int) error {
 	vault, err := uc.repo.LoadVault()
 	if err != nil {
@@ -270,24 +287,36 @@ func (uc *VaultUseCase) InteractiveSearch(clearSec int) error {
 		return errors.New("vault is empty")
 	}
 
-	displayMap := make(map[string]*Entry)
 	var lines []string
+	entryLookup := make([]*Entry, len(vault.Entries))
 
-	for _, e := range vault.Entries {
-		display := fmt.Sprintf("%-34s  │  %-24s  │  %-24s  │  %s", e.Path, e.Title, e.Account, e.URL)
-		lines = append(lines, display)
-		displayMap[display] = e
+	for idx, e := range vault.Entries {
+		entryLookup[idx] = e
+		colPath := fitColumn(e.Path, ColWidthPath)
+		colTitle := fitColumn(e.Title, ColWidthTitle)
+		colAcc := fitColumn(e.Account, ColWidthAccount)
+
+		// Format line with a trailing tab-separated hidden index for zero-ambiguity retrieval
+		formatted := fmt.Sprintf("%s  │  %s  │  %s  │  %s\t#%d", colPath, colTitle, colAcc, e.URL, idx)
+		lines = append(lines, formatted)
 	}
 
-	selectedDisplay, action, err := uc.runFzfUI(lines)
+	selectedLine, action, err := uc.runFzfUI(lines)
 	if err != nil {
 		return nil // Clean cancellation
 	}
 
-	chosen, ok := displayMap[selectedDisplay]
-	if !ok {
+	tabIdx := strings.LastIndex(selectedLine, "\t#")
+	if tabIdx == -1 {
+		return errors.New("malformed fzf selection")
+	}
+
+	idxVal, err := strconv.Atoi(selectedLine[tabIdx+2:])
+	if err != nil || idxVal < 0 || idxVal >= len(entryLookup) {
 		return errors.New("selected item not found in vault")
 	}
+
+	chosen := entryLookup[idxVal]
 
 	targetValue := chosen.Password
 	targetLabel := "password"
@@ -793,6 +822,8 @@ func (uc *VaultUseCase) runFzfUI(lines []string) (string, string, error) {
 		"--prompt=pas > ",
 		"--header=Enter: password | Ctrl-T: title | Ctrl-Y: account | Ctrl-U: url | Ctrl-O: otp",
 		"--expect=ctrl-t,ctrl-y,ctrl-u,ctrl-o",
+		"--delimiter=\t",
+		"--with-nth=1",
 	)
 	cmd.Stdin = strings.NewReader(strings.Join(lines, "\n"))
 	cmd.Stderr = os.Stderr
@@ -827,7 +858,7 @@ func generateCryptographicPassword(length int) (string, error) {
 	return string(result), nil
 }
 
-var version = "2.0.0"
+var version = "2.0.1"
 
 func main() {
 	crypto := NewGPGService()
